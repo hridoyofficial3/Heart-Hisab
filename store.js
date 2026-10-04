@@ -48,6 +48,9 @@ var Store = (function(){
     meta: {}
   };
 
+  var APP_VERSION = '2.1';
+  var TYPES = ['income', 'expense', 'transfer'];
+  var DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   var _lastId = 0;
 
   /* ---------- Utils ---------- */
@@ -68,6 +71,68 @@ var Store = (function(){
     n = Number(n);
     if(!isFinite(n)) return 0;
     return Math.round((n + Number.EPSILON) * 100) / 100;
+  }
+
+  function validDate(d){
+    if(typeof d !== 'string' || !DATE_RE.test(d)) return false;
+    var p = d.split('-').map(Number);
+    var dt = new Date(p[0], p[1] - 1, p[2]);
+    return dt.getFullYear() === p[0] && dt.getMonth() === p[1] - 1 && dt.getDate() === p[2];
+  }
+
+  function sanitizeSettings(s){
+    var out = Object.assign({}, DEFAULT_SET, (s && typeof s === 'object') ? s : {});
+    if(out.lang !== 'en' && out.lang !== 'bn') out.lang = 'bn';
+    if(['system','light','dark'].indexOf(out.theme) === -1) out.theme = 'system';
+    if([0.9, 1, 1.15].indexOf(Number(out.fontScale)) === -1) out.fontScale = 1;
+    else out.fontScale = Number(out.fontScale);
+    if(typeof out.currency !== 'string' || !out.currency) out.currency = '৳';
+    out.currency = out.currency.slice(0, 4);
+    return out;
+  }
+
+  /* সিস্টেম অ্যাকাউন্ট/ক্যাটাগরি না থাকলে ফেরত আনে (ফলব্যাক আইডিগুলো যাতে সবসময় থাকে) */
+  function ensureSystem(list, defaults){
+    defaults.forEach(function(d){
+      var has = list.some(function(x){ return x.id === d.id; });
+      if(!has) list.push(Object.assign({}, d));
+    });
+    return list;
+  }
+
+  /* এন্ট্রি পরিষ্কার: টাইপ, তারিখ, ডুপ্লিকেট আইডি, হারানো অ্যাকাউন্ট/ক্যাটাগরি */
+  function normalizeEntries(list, accounts, categories){
+    var accIds = {}, catIds = {}, seen = {}, out = [], skipped = 0;
+    accounts.forEach(function(a){ accIds[a.id] = true; });
+    categories.forEach(function(c){ catIds[c.id] = c; });
+    var firstAcc = accounts.length ? accounts[0].id : 'acc_cash';
+    (list || []).forEach(function(e){
+      if(!e || typeof e !== 'object'){ skipped++; return; }
+      var amount = round2(Number(e.amount));
+      var type = TYPES.indexOf(e.type) !== -1 ? e.type : null;
+      if(!type || !(amount > 0)){ skipped++; return; }
+      var id = (typeof e.id === 'number' && isFinite(e.id) && !seen[e.id]) ? e.id : nextId();
+      while(seen[id]) id = nextId();
+      seen[id] = true;
+      var accountId = accIds[String(e.accountId)] ? String(e.accountId) : (accIds['acc_cash'] ? 'acc_cash' : firstAcc);
+      var ent = {
+        id: id, type: type, amount: amount, accountId: accountId,
+        date: validDate(e.date) ? e.date : todayISO(),
+        note: typeof e.note === 'string' ? e.note.slice(0, 200) : ''
+      };
+      if(type === 'transfer'){
+        var to = accIds[String(e.toAccountId)] ? String(e.toAccountId) : null;
+        if(!to || to === accountId){ skipped++; return; }
+        ent.toAccountId = to;
+        ent.categoryId = '';
+      } else {
+        var cid = String(e.categoryId || '');
+        var c = catIds[cid];
+        ent.categoryId = (c && c.type === type) ? cid : (type === 'income' ? 'cat_other_in' : 'cat_other_ex');
+      }
+      out.push(ent);
+    });
+    return { entries: out, skipped: skipped };
   }
 
   function notify(msg){
@@ -113,25 +178,14 @@ var Store = (function(){
       state.categories = DEFAULT_CAT.map(function(c){ return Object.assign({}, c); });
     }
 
-    state.entries = read(KEYS.entries, null);
-    if(!Array.isArray(state.entries)) state.entries = [];
-    state.entries = state.entries.filter(function(e){
-      return e && typeof e === 'object' &&
-        typeof e.id === 'number' &&
-        typeof e.amount === 'number' &&
-        isFinite(e.amount) && e.amount > 0;
-    });
+    ensureSystem(state.accounts, DEFAULT_ACC);
+    ensureSystem(state.categories, DEFAULT_CAT);
 
-    var s = read(KEYS.settings, null);
-    state.settings = Object.assign({}, DEFAULT_SET, s || {});
+    var rawEntries = read(KEYS.entries, null);
+    state.entries = normalizeEntries(Array.isArray(rawEntries) ? rawEntries : [], state.accounts, state.categories).entries;
 
+    state.settings = sanitizeSettings(read(KEYS.settings, null));
     state.meta = Object.assign({ schema: 3, lastBackup: null }, read(KEYS.meta, null) || {});
-
-    /* sanitize settings */
-    if(state.settings.lang !== 'en' && state.settings.lang !== 'bn') state.settings.lang = 'bn';
-    if(['system','light','dark'].indexOf(state.settings.theme) === -1) state.settings.theme = 'system';
-    if([0.9, 1, 1.15].indexOf(Number(state.settings.fontScale)) === -1) state.settings.fontScale = 1;
-    if(typeof state.settings.currency !== 'string') state.settings.currency = '৳';
   }
 
   function save(){
@@ -163,6 +217,11 @@ var Store = (function(){
     var bal = 0;
     for(var i = 0; i < state.entries.length; i++){
       var e = state.entries[i];
+      if(e.type === 'transfer'){
+        if(e.accountId === id) bal -= e.amount;
+        else if(e.toAccountId === id) bal += e.amount;
+        continue;
+      }
       if(e.accountId !== id) continue;
       bal += (e.type === 'income') ? e.amount : -e.amount;
     }
@@ -172,7 +231,9 @@ var Store = (function(){
   function totalBalance(){
     var bal = 0;
     for(var i = 0; i < state.entries.length; i++){
-      bal += (state.entries[i].type === 'income') ? state.entries[i].amount : -state.entries[i].amount;
+      var t = state.entries[i];
+      if(t.type === 'transfer') continue;           /* ট্রান্সফারে মোট ব্যালেন্স বদলায় না */
+      bal += (t.type === 'income') ? t.amount : -t.amount;
     }
     return round2(bal);
   }
@@ -180,7 +241,7 @@ var Store = (function(){
   function accountUsage(id){
     var count = 0;
     for(var i = 0; i < state.entries.length; i++){
-      if(state.entries[i].accountId === id) count++;
+      if(state.entries[i].accountId === id || state.entries[i].toAccountId === id) count++;
     }
     return { entries: count };
   }
@@ -284,16 +345,21 @@ var Store = (function(){
   }
 
   function addEntry(e){
+    var type = TYPES.indexOf(e.type) !== -1 ? e.type : 'expense';
     var ent = {
       id: nextId(),
-      type: e.type === 'income' ? 'income' : 'expense',
+      type: type,
       amount: round2(Number(e.amount) || 0),
       accountId: String(e.accountId || 'acc_cash'),
-      categoryId: e.categoryId || (e.type === 'income' ? 'cat_other_in' : 'cat_other_ex'),
-      date: (typeof e.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(e.date)) ? e.date : todayISO(),
+      categoryId: type === 'transfer' ? '' : (e.categoryId || (type === 'income' ? 'cat_other_in' : 'cat_other_ex')),
+      date: validDate(e.date) ? e.date : todayISO(),
       note: typeof e.note === 'string' ? e.note.slice(0, 200) : ''
     };
     if(ent.amount <= 0) throw new Error('Invalid amount');
+    if(type === 'transfer'){
+      ent.toAccountId = String(e.toAccountId || '');
+      if(!ent.toAccountId || ent.toAccountId === ent.accountId) throw new Error('Invalid transfer');
+    }
     state.entries.push(ent);
     saveEntries();
     return ent;
@@ -302,15 +368,27 @@ var Store = (function(){
   function updateEntry(id, patch){
     var e = getEntry(id);
     if(!e) return false;
+    var next = Object.assign({}, e);
+    if(patch.type !== undefined && TYPES.indexOf(patch.type) !== -1) next.type = patch.type;
     if(patch.amount !== undefined){
       var a = round2(Number(patch.amount) || 0);
       if(a <= 0) throw new Error('Invalid amount');
-      e.amount = a;
+      next.amount = a;
     }
-    if(patch.accountId !== undefined) e.accountId = String(patch.accountId);
-    if(patch.categoryId !== undefined) e.categoryId = patch.categoryId;
-    if(patch.date !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(patch.date)) e.date = patch.date;
-    if(patch.note !== undefined) e.note = String(patch.note).slice(0, 200);
+    if(patch.accountId !== undefined) next.accountId = String(patch.accountId);
+    if(patch.date !== undefined && validDate(patch.date)) next.date = patch.date;
+    if(patch.note !== undefined) next.note = String(patch.note).slice(0, 200);
+    if(next.type === 'transfer'){
+      if(patch.toAccountId !== undefined) next.toAccountId = String(patch.toAccountId);
+      if(!next.toAccountId || next.toAccountId === next.accountId) throw new Error('Invalid transfer');
+      next.categoryId = '';
+    } else {
+      delete next.toAccountId;
+      if(patch.categoryId !== undefined) next.categoryId = patch.categoryId;
+      if(!next.categoryId) next.categoryId = next.type === 'income' ? 'cat_other_in' : 'cat_other_ex';
+    }
+    Object.keys(e).forEach(function(k){ delete e[k]; });
+    Object.assign(e, next);
     saveEntries();
     return true;
   }
@@ -338,7 +416,7 @@ var Store = (function(){
     var inc = 0, exp = 0;
     for(var i = 0; i < list.length; i++){
       if(list[i].type === 'income') inc += list[i].amount;
-      else exp += list[i].amount;
+      else if(list[i].type === 'expense') exp += list[i].amount;
     }
     return { income: round2(inc), expense: round2(exp), net: round2(inc - exp) };
   }
@@ -396,89 +474,100 @@ var Store = (function(){
   }
 
   function validateImport(data){
-    if(!data || typeof data !== 'object') return { ok: false, reason: 'invalid' };
+    if(!data || typeof data !== 'object' || Array.isArray(data)) return { ok: false, reason: 'invalid' };
+    if(!Array.isArray(data.entries) && !Array.isArray(data.accounts)) return { ok: false, reason: 'invalid' };
     var accounts = Array.isArray(data.accounts) ? data.accounts.filter(function(a){
       return a && typeof a.id === 'string' && typeof a.name === 'string';
     }) : [];
     var categories = Array.isArray(data.categories) ? data.categories.filter(function(c){
       return c && typeof c.id === 'string' && typeof c.name === 'string';
     }) : [];
-    var entries = Array.isArray(data.entries) ? data.entries.filter(function(e){
-      return e && typeof e === 'object' && isFinite(Number(e.amount)) && Number(e.amount) > 0;
-    }) : [];
-    var settings = (data.settings && typeof data.settings === 'object') ? data.settings : {};
+    var rawEntries = Array.isArray(data.entries) ? data.entries : [];
+    var accs = buildAccounts(accounts), cats = buildCategories(categories);
+    var norm = normalizeEntries(rawEntries, accs, cats);
     return {
       ok: true,
-      accounts: accounts,
-      categories: categories,
-      entries: entries,
-      settings: settings,
+      accounts: accs,
+      categories: cats,
+      entries: norm.entries,
+      settings: sanitizeSettings(data.settings),
       stats: {
-        accounts: accounts.length,
-        categories: categories.length,
-        entries: entries.length
+        accounts: accs.length,
+        categories: cats.length,
+        entries: norm.entries.length,
+        skipped: norm.skipped
       }
     };
   }
 
-  function importData(data){
-    var v = validateImport(data);
-    if(!v.ok) throw new Error('Invalid backup file');
-
-    /* Accounts */
-    var accs = v.accounts.map(function(a){
-      return {
+  function buildAccounts(list){
+    var seen = {};
+    var accs = [];
+    list.forEach(function(a){
+      if(seen[a.id]) return;
+      seen[a.id] = true;
+      accs.push({
         id: String(a.id),
         name: String(a.name).slice(0, 50),
         icon: a.icon || 'wallet',
         color: (typeof a.color === 'string' ? a.color : '#64748B'),
         system: !!a.system,
-        archived: !!a.archived
-      };
+        archived: !!a.archived && !a.system
+      });
     });
-    if(accs.length === 0){
-      accs = DEFAULT_ACC.map(function(a){ return Object.assign({}, a); });
-    }
+    return ensureSystem(accs, DEFAULT_ACC);
+  }
 
-    /* Categories */
-    var cats = v.categories.map(function(c){
-      return {
+  function buildCategories(list){
+    var seen = {};
+    var cats = [];
+    list.forEach(function(c){
+      if(seen[c.id]) return;
+      seen[c.id] = true;
+      cats.push({
         id: String(c.id),
         type: c.type === 'income' ? 'income' : 'expense',
         name: String(c.name).slice(0, 50),
         icon: c.icon || 'tag',
         color: (typeof c.color === 'string' ? c.color : '#64748B'),
         system: !!c.system
-      };
+      });
     });
-    if(cats.length === 0){
-      cats = DEFAULT_CAT.map(function(c){ return Object.assign({}, c); });
-    }
+    return ensureSystem(cats, DEFAULT_CAT);
+  }
 
-    /* Entries */
-    var ents = v.entries.map(function(e){
-      return {
-        id: (typeof e.id === 'number' && isFinite(e.id)) ? e.id : nextId(),
-        type: e.type === 'income' ? 'income' : 'expense',
-        amount: round2(Number(e.amount)),
-        accountId: String(e.accountId || 'acc_cash'),
-        categoryId: String(e.categoryId || (e.type === 'income' ? 'cat_other_in' : 'cat_other_ex')),
-        date: (typeof e.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(e.date)) ? e.date : todayISO(),
-        note: typeof e.note === 'string' ? e.note.slice(0, 200) : ''
-      };
-    });
-
-    /* Settings */
-    var sett = Object.assign({}, DEFAULT_SET, v.settings);
-
-    /* Commit */
-    state.accounts = accs;
-    state.categories = cats;
-    state.entries = ents;
-    state.settings = sett;
+  function importData(data){
+    var v = validateImport(data);
+    if(!v.ok) throw new Error('Invalid backup file');
+    state.accounts = v.accounts;
+    state.categories = v.categories;
+    state.entries = v.entries;
+    state.settings = v.settings;
     save();
+    return { accounts: v.accounts.length, categories: v.categories.length, entries: v.entries.length };
+  }
 
-    return { accounts: accs.length, categories: cats.length, entries: ents.length };
+  /* ---------- CSV (এক্সেলে খোলার জন্য) ---------- */
+  function exportCSV(){
+    function q(v){
+      v = String(v == null ? '' : v);
+      if(/^[=+\-@]/.test(v)) v = "'" + v;                  /* স্প্রেডশিট ফর্মুলা ইনজেকশন রোধ */
+      return '"' + v.replace(/"/g, '""') + '"';
+    }
+    var rows = [['তারিখ', 'ধরন', 'পরিমাণ', 'ক্যাটাগরি', 'অ্যাকাউন্ট', 'গন্তব্য অ্যাকাউন্ট', 'নোট'].map(q).join(',')];
+    state.entries.slice().sort(function(a, b){ return a.date.localeCompare(b.date) || a.id - b.id; }).forEach(function(e){
+      var cat = getCategory(e.categoryId), acc = getAccount(e.accountId), to = e.toAccountId ? getAccount(e.toAccountId) : null;
+      rows.push([
+        e.date,
+        e.type === 'income' ? 'আয়' : e.type === 'expense' ? 'ব্যয়' : 'ট্রান্সফার',
+        e.amount,
+        cat ? cat.name : '',
+        acc ? acc.name : '',
+        to ? to.name : '',
+        e.note
+      ].map(q).join(','));
+    });
+    return '\ufeff' + rows.join('\r\n');
   }
 
   function markBackupDone(){
@@ -503,6 +592,7 @@ var Store = (function(){
   /* ---------- Public API ---------- */
   return {
     state: state,
+    APP_VERSION: APP_VERSION,
 
     load: load,
     save: save,
@@ -537,6 +627,8 @@ var Store = (function(){
     monthlyTrend: monthlyTrend,
 
     exportData: exportData,
+    exportCSV: exportCSV,
+    validDate: validDate,
     validateImport: validateImport,
     importData: importData,
     markBackupDone: markBackupDone,

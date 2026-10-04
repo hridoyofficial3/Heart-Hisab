@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0F766E">
+<meta name="theme-color" content="#06322C">
+<meta name="description" content="সহজ ও অফলাইন-ফ্রেন্ডলি ব্যক্তিগত আয়-ব্যয়ের হিসাব">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="হিসাব খাতা">
@@ -16,7 +17,7 @@
 <body>
 
 <!-- ERROR BOX -->
-<div id="errBox" style="position:fixed;top:0;left:0;right:0;background:#DC2626;color:#fff;padding:10px;font-size:11px;z-index:999999;display:none;max-height:40vh;overflow:auto;font-family:monospace;line-height:1.4"></div>
+<div id="errBox" role="alert" style="position:fixed;top:0;left:0;right:0;background:#DC2626;color:#fff;padding:10px;font-size:11px;z-index:999999;display:none;max-height:40vh;overflow:auto;font-family:monospace;line-height:1.4"></div>
 
 <!-- LOCK SCREEN (hidden by default) -->
 <div id="lockScreen" class="lock-screen hidden">
@@ -40,7 +41,7 @@
       <button type="button" class="pin-key" data-key="7">7</button>
       <button type="button" class="pin-key" data-key="8">8</button>
       <button type="button" class="pin-key" data-key="9">9</button>
-      <button type="button" class="pin-key" data-key="bio" id="pinBioBtn" style="display:none;">🔒</button>
+      <span class="pin-key-spacer"></span>
       <button type="button" class="pin-key" data-key="0">0</button>
       <button type="button" class="pin-key" data-key="del">⌫</button>
     </div>
@@ -159,7 +160,7 @@
       </div>
 
       <div class="chart-card">
-        <div class="chart-head"><h3>মাসিক সারসংক্ষেপ</h3></div>
+        <div class="chart-head"><h3 id="summaryTitle">মাসিক সারসংক্ষেপ</h3></div>
         <div class="summary-rows" id="summaryRows"></div>
       </div>
     </section>
@@ -225,7 +226,7 @@
         <div class="settings-row" data-settings="about">
           <span class="sr-icon" data-icon="info" data-size="18"></span>
           <span class="sr-label">অ্যাপ সম্পর্কে</span>
-          <span class="sr-value">v3.0</span>
+          <span class="sr-value" id="setAboutVal">v2.1</span>
           <span class="sr-chev" data-icon="chevron-right" data-size="18"></span>
         </div>
         <div class="settings-row" data-settings="reset">
@@ -235,7 +236,7 @@
         </div>
       </div>
 
-      <div class="settings-footer"><p>হিসাব খাতা • সংস্করণ ৩.০</p></div>
+      <div class="settings-footer"><p id="settingsFooter">হিসাব খাতা • সংস্করণ ২.১</p></div>
     </section>
   </main>
 
@@ -262,6 +263,7 @@
   </nav>
 </div>
 
+<noscript><p style="padding:24px;text-align:center">এই অ্যাপ চালাতে JavaScript চালু করতে হবে।</p></noscript>
 <div id="modalRoot"></div>
 <div id="toast" class="toast"></div>
 <script src="security.js"></script>
@@ -271,45 +273,12 @@
 <script src="ui.js"></script>
 <script src="app.js"></script>
 <script>
-  // Hydrate icons
-  if (window.Icons) Icons.hydrate();
-  
-  // Set static date
-  (function(){
-    var d = new Date();
-    var M = ['জানুয়ারি','ফেব্রুয়ারি','মার্চ','এপ্রিল','মে','জুন','জুলাই','আগস্ট','সেপ্টেম্বর','অক্টোবর','নভেম্বর','ডিসেম্বর'];
-    var el = document.getElementById('brandDate');
-    if(el) el.textContent = d.getDate() + ' ' + M[d.getMonth()] + ', ' + d.getFullYear();
-    var bi = document.getElementById('brandIcon');
-    if(bi) bi.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>';
-    var si = document.getElementById('statIconIn');
-    if(si) si.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>';
-    var se = document.getElementById('statIconEx');
-    if(se) se.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></svg>';
-    // Demo accounts
-    var accScroll = document.getElementById('accountScroll');
-    if(accScroll){
-      var demo = [
-        {name:'নগদ', color:'#059669', icon:'wallet', bal:'৳০'},
-        {name:'ব্যাংক', color:'#3B82F6', icon:'banknote', bal:'৳০'},
-        {name:'বিকাশ', color:'#E2136E', icon:'phone', bal:'৳০'},
-        {name:'সেভিংস', color:'#B8862E', icon:'piggy-bank', bal:'৳০'}
-      ];
-      accScroll.innerHTML = demo.map(function(a){
-        return '<div class="acc-chip">' +
-          '<div class="acc-chip-icon" style="background:'+a.color+';">' + (window.Icons ? Icons.svg(a.icon, 18) : '') + '</div>' +
-          '<div><div class="acc-chip-name">' + a.name + '</div><div class="acc-chip-bal">' + a.bal + '</div></div>' +
-        '</div>';
-      }).join('');
-    }
-    // Demo empty states
-    var rt = document.getElementById('recentTxns');
-    if(rt) rt.innerHTML = '<div class="empty">কোনো লেনদেন নেই (ডেমো)</div>';
-    var at = document.getElementById('allTxns');
-    if(at) at.innerHTML = '<div class="empty">কোনো লেনদেন নেই (ডেমো)</div>';
-    var sr = document.getElementById('summaryRows');
-    if(sr) sr.innerHTML = '<div class="empty">ডেটা লোড হচ্ছে...</div>';
-  })();
+  // অফলাইন সাপোর্টের জন্য সার্ভিস ওয়ার্কার (শুধু http/https-এ)
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function (e) { console.warn('SW:', e.message); });
+    });
+  }
 </script>
 </body>
 </html>

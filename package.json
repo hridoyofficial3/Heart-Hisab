@@ -1,0 +1,18 @@
+{
+  "name": "hisab-khata",
+  "version": "3.0.0",
+  "private": true,
+  "description": "হিসাব খাতা — ব্যক্তিগত আয়-ব্যয় অ্যাপ",
+  "scripts": {
+    "prepare-www": "node scripts/prepare-www.js",
+    "sync": "node scripts/prepare-www.js && npx cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/core": "^6.1.2"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^6.1.2"
+  }
+}

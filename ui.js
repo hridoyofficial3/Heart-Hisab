@@ -2,6 +2,7 @@
    UI — rendering engine
    ═══════════════════════════════════════════════════════ */
 var UI = (function(){
+  var T = function(){ return I18n.t.apply(I18n, arguments); };
   function $(s, r){ return (r || document).querySelector(s); }
   function $$(s, r){ return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
 
@@ -49,7 +50,9 @@ var UI = (function(){
     var p = iso.split('-').map(Number);
     if(p.length !== 3) return iso;
     var months = monthsList();
-    return I18n.num(p[2]) + ' ' + months[p[1] - 1];
+    var out = I18n.num(p[2]) + ' ' + months[p[1] - 1];
+    if(p[0] !== new Date().getFullYear()) out += ' ' + I18n.num(p[0]);
+    return out;
   }
 
   function todayHeader(){
@@ -63,7 +66,7 @@ var UI = (function(){
   function toast(msg, ms){
     var el = $('#toast');
     if(!el) return;
-    el.textContent = msg;
+    el.textContent = T(msg);
     el.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function(){ el.classList.remove('show'); }, ms || 2800);
@@ -101,7 +104,13 @@ var UI = (function(){
     bd.querySelector('[data-close]').addEventListener('click', close);
     document.addEventListener('keydown', onKey);
     Icons.hydrate(bd);
+    I18n.translateDOM(bd);
     return { close: close, backdrop: bd };
+  }
+
+  function closeAllModals(){
+    var root = $('#modalRoot');
+    if(root) root.innerHTML = '';
   }
 
   function confirm(msg, onYes, opt){
@@ -137,7 +146,7 @@ var UI = (function(){
     var el = $('#brandDate');
     if(el) el.textContent = todayHeader();
     var bn = $('#brandName');
-    if(bn) bn.textContent = 'হিসাব খাতা';
+    if(bn) bn.textContent = T('হিসাব খাতা');
     var bi = $('#brandIcon');
     if(bi) bi.innerHTML = Icons.svg('receipt', 20);
   }
@@ -164,7 +173,9 @@ var UI = (function(){
 
     var accScroll = $('#accountScroll');
     if(accScroll){
-      var accs = Store.getActiveAccounts();
+      var accs = Store.state.accounts.filter(function(a){
+        return !a.archived || Store.accountBalance(a.id) !== 0;   /* আর্কাইভ হলেও টাকা থাকলে দেখাবে, নইলে যোগফল মেলে না */
+      });
       if(accs.length === 0){
         accScroll.innerHTML = '<div class="empty" style="width:100%;">কোনো অ্যাকাউন্ট নেই</div>';
       } else {
@@ -172,7 +183,7 @@ var UI = (function(){
           var bal = Store.accountBalance(a.id);
           return '<div class="acc-chip">' +
             '<div class="acc-chip-icon" style="background:' + esc(a.color) + ';">' + Icons.svg(a.icon, 18) + '</div>' +
-            '<div><div class="acc-chip-name">' + esc(a.name) + '</div>' +
+            '<div><div class="acc-chip-name">' + esc(a.name) + (a.archived ? ' ⁎' : '') + '</div>' +
             '<div class="acc-chip-bal">' + money(bal) + '</div></div>' +
           '</div>';
         }).join('');
@@ -183,6 +194,7 @@ var UI = (function(){
       return (b.date || '').localeCompare(a.date || '') || (b.id - a.id);
     }).slice(0, 10);
     renderTxnList($('#recentTxns'), recent, 'কোনো লেনদেন নেই');
+    I18n.translateDOM($('#panel-home'));
   }
 
   /* ---------- Txn list ---------- */
@@ -190,6 +202,7 @@ var UI = (function(){
     if(!container) return;
     if(!list || list.length === 0){
       container.innerHTML = '<div class="empty">' + esc(emptyMsg || 'কিছু নেই') + '</div>';
+      I18n.translateDOM(container);
       return;
     }
     container.innerHTML = list.map(renderTxnItem).join('');
@@ -198,84 +211,116 @@ var UI = (function(){
         var id = Number(el.dataset.txn);
         if(typeof App !== 'undefined' && App.showEntrySheet) App.showEntrySheet(id);
       });
+      el.addEventListener('keydown', function(ev){
+        if(ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); el.click(); }
+      });
     });
+    I18n.translateDOM(container);
   }
 
   function renderTxnItem(e){
+    var isTransfer = e.type === 'transfer';
     var isIncome = e.type === 'income';
     var cat = Store.getCategory(e.categoryId);
     var acc = Store.getAccount(e.accountId);
-    var catName = cat ? cat.name : (isIncome ? 'আয়' : 'ব্যয়');
-    var accName = acc ? acc.name : '';
-    var iconName = cat ? cat.icon : (isIncome ? 'trending-up' : 'trending-down');
-    var iconClass = isIncome ? 'income' : 'expense';
+    var to = isTransfer ? Store.getAccount(e.toAccountId) : null;
+    var catName = T(isTransfer ? 'ট্রান্সফার' : (cat ? cat.name : (isIncome ? 'আয়' : 'ব্যয়')));
+    var accName = acc ? T(acc.name) : '';
+    var iconName = isTransfer ? 'repeat' : (cat ? cat.icon : (isIncome ? 'trending-up' : 'trending-down'));
+    var iconClass = isTransfer ? 'transfer' : (isIncome ? 'income' : 'expense');
     var title = e.note || catName;
     var meta = [];
     if(catName && e.note) meta.push(catName);
-    if(accName) meta.push(accName);
+    if(isTransfer) meta.push(accName + ' → ' + (to ? T(to.name) : '?'));
+    else if(accName) meta.push(accName);
     meta.push(fmtDate(e.date));
-    return '<div class="txn-item" data-txn="' + Number(e.id) + '">' +
+    var sign = isTransfer ? '' : (isIncome ? '+' : '-');
+    return '<div class="txn-item" role="button" tabindex="0" data-txn="' + Number(e.id) + '">' +
       '<div class="txn-icon ' + iconClass + '">' + Icons.svg(iconName, 18) + '</div>' +
       '<div class="txn-body"><div class="txn-title">' + esc(title) + '</div>' +
       '<div class="txn-meta">' + meta.map(esc).join(' · ') + '</div></div>' +
-      '<div class="txn-amount ' + iconClass + '">' + (isIncome ? '+' : '-') + money(e.amount) + '</div>' +
+      '<div class="txn-amount ' + iconClass + '">' + sign + money(e.amount) + '</div>' +
     '</div>';
   }
 
   /* ---------- Transactions panel ---------- */
   var txnFilter = { account: 'all', type: 'all', q: '' };
+  var PAGE = 50;
+  var txnLimit = PAGE;
 
-  function renderTxns(){
+  function renderTxns(resetLimit){
     var container = $('#allTxns');
     if(!container) return;
+    if(resetLimit === true) txnLimit = PAGE;
 
     var chips = $('#txnFilterChips');
     if(chips){
       var accs = Store.getActiveAccounts();
-      var html = '<button type="button" class="filter-chip' +
-        (txnFilter.account === 'all' && txnFilter.type === 'all' ? ' active' : '') +
-        '" data-f="all:all">সব</button>';
-      html += '<button type="button" class="filter-chip' +
-        (txnFilter.type === 'income' && txnFilter.account === 'all' ? ' active' : '') +
-        '" data-f="all:income">আয়</button>';
-      html += '<button type="button" class="filter-chip' +
-        (txnFilter.type === 'expense' && txnFilter.account === 'all' ? ' active' : '') +
-        '" data-f="all:expense">ব্যয়</button>';
+      function chip(f, label, on){
+        return '<button type="button" class="filter-chip' + (on ? ' active' : '') + '" data-f="' + esc(f) + '">' + esc(label) + '</button>';
+      }
+      var allOn = txnFilter.account === 'all' && txnFilter.type === 'all';
+      var html = chip('all:all', 'সব', allOn);
+      html += chip('all:income', 'আয়', txnFilter.type === 'income' && txnFilter.account === 'all');
+      html += chip('all:expense', 'ব্যয়', txnFilter.type === 'expense' && txnFilter.account === 'all');
+      html += chip('all:transfer', 'ট্রান্সফার', txnFilter.type === 'transfer' && txnFilter.account === 'all');
       accs.forEach(function(a){
-        html += '<button type="button" class="filter-chip' +
-          (txnFilter.account === a.id ? ' active' : '') +
-          '" data-f="' + esc(a.id) + ':all">' + esc(a.name) + '</button>';
+        html += chip(a.id + ':all', a.name, txnFilter.account === a.id);
       });
       chips.innerHTML = html;
       chips.querySelectorAll('[data-f]').forEach(function(b){
         b.addEventListener('click', function(){
-          var p = b.dataset.f.split(':');
-          txnFilter.account = p[0];
-          txnFilter.type = p[1];
-          renderTxns();
+          var f = b.dataset.f;
+          var i = f.lastIndexOf(':');
+          txnFilter.account = f.slice(0, i);
+          txnFilter.type = f.slice(i + 1);
+          renderTxns(true);
         });
       });
+      I18n.translateDOM(chips);
     }
 
     var list = Store.state.entries.slice();
-    if(txnFilter.account !== 'all') list = list.filter(function(e){ return e.accountId === txnFilter.account; });
+    if(txnFilter.account !== 'all') list = list.filter(function(e){
+      return e.accountId === txnFilter.account || e.toAccountId === txnFilter.account;
+    });
     if(txnFilter.type !== 'all') list = list.filter(function(e){ return e.type === txnFilter.type; });
     if(txnFilter.q){
-      var q = txnFilter.q.toLowerCase();
+      var q = I18n.toAsciiDigits(txnFilter.q).toLowerCase();
       list = list.filter(function(e){
         var cat = Store.getCategory(e.categoryId);
+        var acc = Store.getAccount(e.accountId);
         return (e.note || '').toLowerCase().indexOf(q) !== -1 ||
-               (cat && cat.name.toLowerCase().indexOf(q) !== -1);
+               (cat && cat.name.toLowerCase().indexOf(q) !== -1) ||
+               (acc && acc.name.toLowerCase().indexOf(q) !== -1) ||
+               String(e.amount).indexOf(q) !== -1 ||
+               e.date.indexOf(q) !== -1;
       });
     }
     list.sort(function(a, b){
       return (b.date || '').localeCompare(a.date || '') || (b.id - a.id);
     });
-    renderTxnList(container, list, txnFilter.q ? 'কিছু পাওয়া যায়নি' : 'কোনো লেনদেন নেই');
+    var total = list.length;
+    renderTxnList(container, list.slice(0, txnLimit), txnFilter.q ? 'কিছু পাওয়া যায়নি' : 'কোনো লেনদেন নেই');
+    if(total > txnLimit){
+      var more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'btn btn-secondary load-more';
+      more.textContent = T('আরও দেখুন') + ' (' + I18n.num(total - txnLimit) + ')';
+      more.addEventListener('click', function(){ txnLimit += PAGE; renderTxns(); });
+      container.appendChild(more);
+    }
   }
 
   /* ---------- Summary ---------- */
   var summaryPeriod = 'month';
+  var PERIOD_TITLES = { week: 'সাপ্তাহিক সারসংক্ষেপ', month: 'মাসিক সারসংক্ষেপ', year: 'বাৎসরিক সারসংক্ষেপ', all: 'সার্বিক সারসংক্ষেপ' };
+
+  function setPeriod(p){
+    if(!PERIOD_TITLES[p]) return;
+    summaryPeriod = p;
+    renderSummary();
+  }
 
   function renderSummary(){
     $$('.period-tab').forEach(function(t){
@@ -287,6 +332,8 @@ var UI = (function(){
     renderPie($('#pieIncome'), $('#legendIncome'), 'income', range.from, range.to, $('#pieIncomeTotal'));
     renderPie($('#pieExpense'), $('#legendExpense'), 'expense', range.from, range.to, $('#pieExpenseTotal'));
 
+    var st = $('#summaryTitle');
+    if(st) st.textContent = T(PERIOD_TITLES[summaryPeriod]);
     var rows = $('#summaryRows');
     if(rows){
       var net = Store.round2(s.income - s.expense);
@@ -298,6 +345,7 @@ var UI = (function(){
         '<div class="summary-row"><span class="label">নেট</span>' +
         '<span class="value" style="color:' + (net >= 0 ? 'var(--income)' : 'var(--expense)') + ';">' + money(net) + '</span></div>';
     }
+    I18n.translateDOM($('#panel-summary'));
   }
 
   function getPeriodRange(period){
@@ -387,29 +435,34 @@ var UI = (function(){
 
     var themeLabels = { system: 'সিস্টেম', light: 'লাইট', dark: 'ডার্ক' };
     el = $('#setAppearanceVal');
-    if(el) el.textContent = themeLabels[s.theme] || 'সিস্টেম';
+    if(el) el.textContent = T(themeLabels[s.theme] || 'সিস্টেম');
 
     var fontLabels = { '0.9': 'ছোট', '1': 'মাঝারি', '1.15': 'বড়' };
     el = $('#setFontVal');
-    if(el) el.textContent = fontLabels[String(s.fontScale)] || 'মাঝারি';
+    if(el) el.textContent = T(fontLabels[String(s.fontScale)] || 'মাঝারি');
 
     el = $('#setCategoriesVal');
-    if(el) el.textContent = s.categoryMode === 'custom' ? 'কাস্টম' : 'ডিফল্ট';
+    if(el) el.textContent = T('{0}টি', I18n.num(Store.state.categories.length));
 
     el = $('#setAccountsVal');
-    if(el) el.textContent = Store.getActiveAccounts().length + 'টি';
+    if(el) el.textContent = T('{0}টি', I18n.num(Store.getActiveAccounts().length));
 
     el = $('#setSecurityVal');
-    if(el) el.textContent = Security.isPinSet() ? 'চালু' : 'বন্ধ';
+    if(el) el.textContent = T(Security.isPinSet() ? 'চালু' : 'বন্ধ');
+
+    el = $('#setAboutVal');
+    if(el) el.textContent = 'v' + Store.APP_VERSION;
+    el = $('#settingsFooter');
+    if(el) el.textContent = T('হিসাব খাতা') + ' • ' + T('সংস্করণ {0}', I18n.num(Store.APP_VERSION));
 
     var meta = Store.state.meta;
     el = $('#setBackupVal');
     if(el){
       if(meta.lastBackup){
         var days = Math.floor((Date.now() - meta.lastBackup) / 86400000);
-        el.textContent = days === 0 ? 'আজ' : (days + ' দিন আগে');
+        el.textContent = days <= 0 ? T('আজ') : T('{0} দিন আগে', I18n.num(days));
       } else {
-        el.textContent = 'কখনো না';
+        el.textContent = T('কখনো না');
       }
     }
   }
@@ -419,9 +472,11 @@ var UI = (function(){
     $$('.panel').forEach(function(p){ p.classList.toggle('active', p.id === 'panel-' + name); });
     $$('.nav-btn').forEach(function(b){ b.classList.toggle('active', b.dataset.panel === name); });
     if(name === 'home') renderHome();
-    else if(name === 'txns') renderTxns();
+    else if(name === 'txns') renderTxns(true);
     else if(name === 'summary') renderSummary();
     else if(name === 'settings') renderSettings();
+    var panel = $('#panel-' + name);
+    if(panel) I18n.translateDOM(panel);
   }
 
   /* ---------- Theme / Font ---------- */
@@ -444,6 +499,7 @@ var UI = (function(){
   function applyLanguage(){
     I18n.setLang(Store.state.settings.lang);
     document.documentElement.lang = Store.state.settings.lang;
+    I18n.translateDOM(document.body);
     renderHeader();
     renderSettings();
     var active = $('.panel.active');
@@ -471,6 +527,8 @@ var UI = (function(){
     applyLanguage: applyLanguage,
     refreshAll: refreshAll,
     toast: toast,
+    closeAllModals: closeAllModals,
+    setPeriod: setPeriod,
     openModal: openModal,
     confirm: confirm,
     alert: alert,

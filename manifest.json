@@ -7,7 +7,7 @@
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#F8FAFC",
-  "theme_color": "#0F766E",
+  "theme_color": "#06322C",
   "lang": "bn",
   "dir": "ltr",
   "icons": [
@@ -29,5 +29,10 @@
       "type": "image/png",
       "purpose": "maskable"
     }
+  ],
+  "id": "./index.html",
+  "categories": [
+    "finance",
+    "productivity"
   ]
 }

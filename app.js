@@ -6,15 +6,19 @@ var App = (function(){
   function $$(s, r){ return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
 
   var pinBuffer = '';
+  var T = function(){ return I18n.t.apply(I18n, arguments); };
+  var cooldownTimer = null;
 
   /* ---------- Init ---------- */
   function init(){
     try {
       Store.load();
+      I18n.setLang(Store.state.settings.lang);
+      document.documentElement.lang = Store.state.settings.lang;
       Icons.hydrate(document);
       UI.applyTheme();
       UI.applyFont();
-      I18n.setLang(Store.state.settings.lang);
+      I18n.translateDOM(document.body);
 
       bindLockScreen();
       bindNavigation();
@@ -31,12 +35,42 @@ var App = (function(){
       }
     } catch(e){
       var b = $('#errBox');
-      if(b){ b.style.display = 'block'; b.innerHTML += '💥 INIT: ' + e.message + '<br>'; }
+      if(b){
+        b.style.display = 'block';
+        b.textContent = T('অ্যাপ চালু করতে সমস্যা হয়েছে। পেজটি রিফ্রেশ করুন।') + ' (' + e.message + ')';
+      }
       console.error(e);
     }
   }
 
   /* ---------- Lock ---------- */
+  function fmtWait(sec){
+    return sec >= 60
+      ? T('{0} মিনিট', I18n.num(Math.ceil(sec / 60)))
+      : T('{0} সেকেন্ড', I18n.num(sec));
+  }
+
+  function tickCooldown(){
+    var err = $('#lockError');
+    clearInterval(cooldownTimer);
+    function upd(){
+      var cd = Security.cooldownRemaining();
+      if(cd <= 0){
+        clearInterval(cooldownTimer);
+        if(err) err.textContent = '';
+        return;
+      }
+      if(err) err.textContent = T('অপেক্ষা করুন {0}', fmtWait(cd));
+    }
+    upd();
+    cooldownTimer = setInterval(upd, 1000);
+  }
+
+  function lockVisible(){
+    var ls = $('#lockScreen');
+    return !!ls && !ls.classList.contains('hidden');
+  }
+
   function bindLockScreen(){
     var pad = $('#pinPad');
     if(pad){
@@ -46,15 +80,23 @@ var App = (function(){
         onPinKey(btn.dataset.key);
       });
     }
+    /* কীবোর্ড সাপোর্ট (ডেস্কটপ) */
+    document.addEventListener('keydown', function(e){
+      if(!lockVisible()) return;
+      if(/^[0-9]$/.test(e.key)) onPinKey(e.key);
+      else if(e.key === 'Backspace') onPinKey('del');
+    });
     var forgot = $('#lockForgotBtn');
     if(forgot){
       forgot.addEventListener('click', function(){
-        UI.confirm('PIN ভুলে গেছেন? অ্যাপ লক বন্ধ করতে সব ডেটা মুছতে হবে। চালিয়ে যাবেন?',
+        /* আগে: শুধু লক খুলে দিত, ডেটা মুছত না (লক বাইপাস)। এখন সত্যিই সব ডেটা মোছা হয়। */
+        UI.confirm(T('PIN ভুলে গেলে লক বন্ধ করতে এই অ্যাপের সব ডেটা মুছে ফেলতে হবে। আগে ব্যাকআপ নিয়ে থাকলে পরে ফিরিয়ে আনতে পারবেন।\n\nসব ডেটা মুছে লক বন্ধ করবেন?'),
           function(){
+            Store.resetAll();
             Security.clearPin();
-            UI.toast('লক বন্ধ হয়েছে');
-            showApp();
-          }, { danger: true, yesText: 'হ্যাঁ' });
+            UI.toast('লক বন্ধ ও ডেটা মুছে ফেলা হয়েছে');
+            setTimeout(function(){ location.reload(); }, 800);
+          }, { danger: true, yesText: 'হ্যাঁ, সব মুছুন' });
       });
     }
   }
@@ -63,12 +105,14 @@ var App = (function(){
     var ls = $('#lockScreen');
     var app = $('#app');
     if(!ls || !app) return;
+    UI.closeAllModals();                       /* লকের ওপরে যেন কোনো মডাল খোলা না থাকে */
     ls.classList.remove('hidden');
     app.classList.add('hidden');
     pinBuffer = '';
     updateDots();
     var err = $('#lockError');
     if(err) err.textContent = '';
+    if(Security.cooldownRemaining() > 0) tickCooldown();
   }
 
   function showApp(){
@@ -76,7 +120,8 @@ var App = (function(){
     if(app) app.classList.remove('hidden');
     var ls = $('#lockScreen');
     if(ls) ls.classList.add('hidden');
-    Security.recordActivity();
+    clearInterval(cooldownTimer);
+    Security.recordActivity(true);
     UI.refreshAll();
   }
 
@@ -89,21 +134,16 @@ var App = (function(){
 
   function onPinKey(key){
     var err = $('#lockError');
-    if(err) err.textContent = '';
 
-    var cd = Security.cooldownRemaining();
-    if(cd > 0){
-      if(err) err.textContent = 'অপেক্ষা করুন ' + cd + ' সেকেন্ড';
+    if(Security.cooldownRemaining() > 0){
+      tickCooldown();
       return;
     }
+    if(err) err.textContent = '';
 
     if(key === 'del'){
       pinBuffer = pinBuffer.slice(0, -1);
       updateDots();
-      return;
-    }
-    if(key === 'bio'){
-      // WebAuthn not implemented in this build
       return;
     }
     if(!/^\d$/.test(key)) return;
@@ -112,7 +152,8 @@ var App = (function(){
     updateDots();
 
     if(pinBuffer.length === Security.PIN_LENGTH){
-      Security.verifyPin(pinBuffer).then(function(ok){
+      var entered = pinBuffer;
+      Security.verifyPin(entered).then(function(ok){
         if(ok){
           Security.recordSuccess();
           pinBuffer = '';
@@ -123,9 +164,9 @@ var App = (function(){
           pinBuffer = '';
           setTimeout(updateDots, 200);
           if(r.cooldownSec){
-            if(err) err.textContent = 'অপেক্ষা করুন ' + r.cooldownSec + ' সেকেন্ড';
-          } else {
-            if(err) err.textContent = 'ভুল PIN';
+            tickCooldown();
+          } else if(err){
+            err.textContent = T('ভুল PIN');
           }
         }
       });
@@ -162,26 +203,23 @@ var App = (function(){
     var s = $('#txnSearch');
     if(s) s.addEventListener('input', function(){
       UI.txnFilter.q = s.value.trim();
-      UI.renderTxns();
+      UI.renderTxns(true);
     });
   }
 
   function bindPeriodTabs(){
     $$('.period-tab').forEach(function(t){
-      t.addEventListener('click', function(){
-        $$('.period-tab').forEach(function(x){ x.classList.remove('active'); });
-        t.classList.add('active');
-        UI.renderSummary();
-        // Update internal period
-        try {
-          // Trigger click on already active check
-        } catch(e){}
-      });
+      t.addEventListener('click', function(){ UI.setPeriod(t.dataset.period); });
     });
   }
 
   function bindSettingsRows(){
     $$('[data-settings]').forEach(function(row){
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      row.addEventListener('keydown', function(ev){
+        if(ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); row.click(); }
+      });
       row.addEventListener('click', function(){
         var k = row.dataset.settings;
         if(k === 'language') openLanguageModal();
@@ -198,23 +236,22 @@ var App = (function(){
   }
 
   function bindGlobalEvents(){
-    ['touchstart','mousedown','keydown','scroll'].forEach(function(ev){
-      document.addEventListener(ev, function(){ Security.recordActivity(); }, { passive: true });
+    ['touchstart','mousedown','keydown'].forEach(function(ev){
+      document.addEventListener(ev, function(){ Security.recordActivity(); }, { passive: true, capture: true });
     });
-    setInterval(function(){
+    document.addEventListener('scroll', function(){ Security.recordActivity(); }, { passive: true, capture: true });
+    function lockIfIdle(){
       var app = $('#app');
       if(app && !app.classList.contains('hidden') && Security.isPinSet() && Security.isIdle()){
         showLockScreen();
+        return true;
       }
-    }, 15000);
+      return false;
+    }
+    setInterval(lockIfIdle, 15000);
     document.addEventListener('visibilitychange', function(){
-      if(document.visibilityState === 'visible'){
-        var app = $('#app');
-        if(app && !app.classList.contains('hidden') && Security.isPinSet() && Security.isIdle()){
-          showLockScreen();
-        } else {
-          Security.recordActivity();
-        }
+      if(document.visibilityState === 'visible' && !lockIfIdle()){
+        Security.recordActivity(true);
       }
     });
     if(window.matchMedia){
@@ -233,6 +270,13 @@ var App = (function(){
     if(isEdit && !entry) return;
 
     var accounts = Store.getActiveAccounts();
+    if(entry){
+      /* এডিটের সময় আর্কাইভ করা অ্যাকাউন্টও যেন তালিকায় থাকে, নইলে চুপচাপ অন্য অ্যাকাউন্টে সরে যেত */
+      [entry.accountId, entry.toAccountId].forEach(function(aid){
+        var a = aid ? Store.getAccount(aid) : null;
+        if(a && accounts.indexOf(a) === -1) accounts = accounts.concat([a]);
+      });
+    }
     if(accounts.length === 0){
       UI.alert('কোনো অ্যাকাউন্ট নেই। সেটিংস থেকে যোগ করুন।');
       return;
@@ -240,34 +284,45 @@ var App = (function(){
 
     var curType = entry ? entry.type : 'expense';
     var curAccId = entry ? entry.accountId : accounts[0].id;
+    var curToId = entry && entry.toAccountId ? entry.toAccountId : '';
+    if(!curToId){
+      var other = accounts.filter(function(a){ return a.id !== curAccId; })[0];
+      curToId = other ? other.id : '';
+    }
     var curAmount = entry ? entry.amount : '';
     var curDate = entry ? entry.date : Store.todayISO();
     var curNote = entry ? entry.note : '';
+    var sym = (Store.state.settings && Store.state.settings.currency) || '৳';
 
-    var accs = accounts.map(function(a){
-      return '<option value="' + UI.esc(a.id) + '"' + (a.id === curAccId ? ' selected' : '') + '>' + UI.esc(a.name) + '</option>';
-    }).join('');
+    function opts(selId){
+      return accounts.map(function(a){
+        return '<option value="' + UI.esc(a.id) + '"' + (a.id === selId ? ' selected' : '') + '>' +
+          UI.esc(a.name) + (a.archived ? ' ⁎' : '') + '</option>';
+      }).join('');
+    }
+    function tbtn(t, label){
+      return '<button type="button" data-type="' + t + '" class="' + (curType === t ? 'active ' + t : '') + '">' + label + '</button>';
+    }
 
     var body =
-      '<div class="type-toggle" id="sheetTypeToggle">' +
-        '<button type="button" data-type="expense" class="' + (curType === 'expense' ? 'active expense' : '') + '">ব্যয়</button>' +
-        '<button type="button" data-type="income" class="' + (curType === 'income' ? 'active income' : '') + '">আয়</button>' +
-      '</div>' +
+      '<div class="type-toggle" id="sheetTypeToggle">' + tbtn('expense', 'ব্যয়') + tbtn('income', 'আয়') + tbtn('transfer', 'ট্রান্সফার') + '</div>' +
       '<div class="field"><label class="field-label">পরিমাণ</label>' +
-        '<div class="amount-input-wrap"><span class="currency">৳</span>' +
+        '<div class="amount-input-wrap"><span class="currency">' + UI.esc(sym) + '</span>' +
         '<input type="text" inputmode="decimal" class="field-input" id="sheetAmount" value="' + (curAmount || '') + '" placeholder="0"></div>' +
       '</div>' +
-      '<div class="field"><label class="field-label">ক্যাটাগরি</label>' +
+      '<div class="field" id="sheetCatField"><label class="field-label">ক্যাটাগরি</label>' +
         '<div class="category-grid" id="sheetCatGrid"></div>' +
       '</div>' +
       '<div class="row2">' +
-        '<div class="field"><label class="field-label">অ্যাকাউন্ট</label>' +
-          '<select class="field-select" id="sheetAccount">' + accs + '</select></div>' +
+        '<div class="field"><label class="field-label" id="sheetAccLabel">অ্যাকাউন্ট</label>' +
+          '<select class="field-select" id="sheetAccount">' + opts(curAccId) + '</select></div>' +
         '<div class="field"><label class="field-label">তারিখ</label>' +
           '<input type="date" class="field-input" id="sheetDate" value="' + UI.esc(curDate) + '"></div>' +
       '</div>' +
+      '<div class="field" id="sheetToField" style="display:none;"><label class="field-label">কোথায়</label>' +
+        '<select class="field-select" id="sheetToAccount">' + opts(curToId) + '</select></div>' +
       '<div class="field"><label class="field-label">নোট</label>' +
-        '<input type="text" class="field-input" id="sheetNote" value="' + UI.esc(curNote) + '" placeholder="বিবরণ..."></div>' +
+        '<input type="text" class="field-input" id="sheetNote" maxlength="200" value="' + UI.esc(curNote) + '" placeholder="বিবরণ..."></div>' +
       (isEdit ? '<button type="button" class="btn btn-danger" id="sheetDelete" style="margin-top:4px;">লেনদেন মুছুন</button>' : '');
 
     var footer = '<button type="button" class="btn btn-primary" id="sheetSave" style="margin-top:8px;">' +
@@ -276,22 +331,32 @@ var App = (function(){
     var m = UI.openModal({ title: isEdit ? 'লেনদেন এডিট' : 'নতুন লেনদেন', body: body, footer: footer });
     if(!m) return;
     var bd = m.backdrop;
+    var activeType = curType;
 
-    renderCatGrid(bd, curType, entry ? entry.categoryId : null);
+    function applyTypeUI(type){
+      activeType = type;
+      var isT = type === 'transfer';
+      bd.querySelector('#sheetCatField').style.display = isT ? 'none' : '';
+      bd.querySelector('#sheetToField').style.display = isT ? '' : 'none';
+      bd.querySelector('#sheetAccLabel').textContent = T(isT ? 'কোথা থেকে' : 'অ্যাকাউন্ট');
+      if(!isT) renderCatGrid(bd, type, (entry && entry.type === type) ? entry.categoryId : null);
+    }
+    applyTypeUI(curType);
 
     bd.querySelectorAll('#sheetTypeToggle button').forEach(function(btn){
       btn.addEventListener('click', function(){
         bd.querySelectorAll('#sheetTypeToggle button').forEach(function(b){
-          b.classList.remove('active', 'income', 'expense');
+          b.classList.remove('active', 'income', 'expense', 'transfer');
         });
         btn.classList.add('active', btn.dataset.type);
-        renderCatGrid(bd, btn.dataset.type, null);
+        applyTypeUI(btn.dataset.type);
       });
     });
 
     var amountInput = bd.querySelector('#sheetAmount');
     amountInput.addEventListener('input', function(){
-      var v = amountInput.value.replace(/[^\d.]/g, '');
+      /* বাংলা ডিজিট (১২৩) লিখলেও কাজ করবে */
+      var v = I18n.toAsciiDigits(amountInput.value).replace(/[^\d.]/g, '');
       var dot = v.indexOf('.');
       if(dot >= 0) v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, '').slice(0, 2);
       amountInput.value = v;
@@ -299,29 +364,36 @@ var App = (function(){
     setTimeout(function(){ amountInput.focus(); }, 300);
 
     bd.querySelector('#sheetSave').addEventListener('click', function(){
-      var type = bd.querySelector('#sheetTypeToggle button.active').dataset.type;
+      var type = activeType;
       var amount = parseFloat(amountInput.value);
       var accountId = bd.querySelector('#sheetAccount').value;
-      var date = bd.querySelector('#sheetDate').value || Store.todayISO();
+      var toAccountId = bd.querySelector('#sheetToAccount').value;
+      var date = bd.querySelector('#sheetDate').value;
+      if(!Store.validDate(date)) date = Store.todayISO();
       var note = bd.querySelector('#sheetNote').value.trim();
       var activeCat = bd.querySelector('.category-item.active');
       var categoryId = activeCat ? activeCat.dataset.cat : (type === 'income' ? 'cat_other_in' : 'cat_other_ex');
 
       if(!amount || amount <= 0){ UI.toast('সঠিক পরিমাণ লিখুন'); return; }
       if(!accountId){ UI.toast('অ্যাকাউন্ট সিলেক্ট করুন'); return; }
+      if(type === 'transfer'){
+        if(accounts.length < 2){ UI.toast('ট্রান্সফারের জন্য কমপক্ষে ২টি অ্যাকাউন্ট দরকার'); return; }
+        if(!toAccountId || toAccountId === accountId){ UI.toast('দুটি আলাদা অ্যাকাউন্ট বেছে নিন'); return; }
+      }
 
       try {
+        var data = { type: type, amount: amount, accountId: accountId, toAccountId: toAccountId, categoryId: categoryId, date: date, note: note };
         if(isEdit){
-          Store.updateEntry(id, { amount: amount, accountId: accountId, categoryId: categoryId, date: date, note: note });
+          Store.updateEntry(id, data);
           UI.toast('আপডেট হয়েছে');
         } else {
-          Store.addEntry({ type: type, amount: amount, accountId: accountId, categoryId: categoryId, date: date, note: note });
+          Store.addEntry(data);
           UI.toast('যোগ হয়েছে');
         }
         m.close();
         UI.refreshAll();
       } catch(err){
-        UI.toast('সমস্যা: ' + err.message);
+        UI.toast(T('সমস্যা: {0}', err.message));
       }
     });
 
@@ -342,7 +414,8 @@ var App = (function(){
     var grid = root.querySelector('#sheetCatGrid');
     if(!grid) return;
     var cats = Store.categoriesByType(type);
-    if(!selectedId && cats.length > 0) selectedId = cats[0].id;
+    var found = cats.some(function(c){ return c.id === selectedId; });
+    if(!found && cats.length > 0) selectedId = cats[0].id;
     grid.innerHTML = cats.map(function(c){
       return '<button type="button" class="category-item' +
         (c.id === selectedId ? ' active' : '') +
@@ -355,6 +428,7 @@ var App = (function(){
         btn.classList.add('active');
       });
     });
+    I18n.translateDOM(grid);
   }
 
   /* ---------- Language modal ---------- */
@@ -450,6 +524,7 @@ var App = (function(){
           Icons.svg(c.icon, 18) + '</div>' +
         '<div class="txn-body"><div class="txn-title">' + UI.esc(c.name) + '</div>' +
         '<div class="txn-meta">' + (c.system ? 'ডিফল্ট' : 'কাস্টম') + '</div></div>' +
+        (!c.system ? '<button type="button" class="link-btn" data-edit="' + UI.esc(c.id) + '" style="margin-right:6px;">এডিট</button>' : '') +
         (!c.system ? '<button type="button" class="link-btn" data-del="' + UI.esc(c.id) + '" style="color:var(--expense);">মুছুন</button>' : '') +
       '</div>';
     }
@@ -461,7 +536,14 @@ var App = (function(){
     var m = UI.openModal({ title: 'ক্যাটাগরি', body: body });
     if(!m) return;
     var addBtn = m.backdrop.querySelector('#addCatBtn');
-    if(addBtn) addBtn.addEventListener('click', function(){ m.close(); setTimeout(openAddCat, 250); });
+    if(addBtn) addBtn.addEventListener('click', function(){ m.close(); setTimeout(function(){ openAddCat(); }, 250); });
+    m.backdrop.querySelectorAll('[data-edit]').forEach(function(b){
+      b.addEventListener('click', function(){
+        var cid = b.dataset.edit;
+        m.close();
+        setTimeout(function(){ openAddCat(cid); }, 250);
+      });
+    });
     m.backdrop.querySelectorAll('[data-del]').forEach(function(b){
       b.addEventListener('click', function(){
         UI.confirm('মুছে ফেলবেন?', function(){
@@ -469,30 +551,39 @@ var App = (function(){
           m.close();
           setTimeout(renderCats, 250);
           UI.toast('মুছে ফেলা হয়েছে');
+          UI.refreshAll();
         }, { danger: true });
       });
     });
   }
 
-  function openAddCat(){
+  function openAddCat(editId){
+    var isEdit = !!editId;
+    var cat = isEdit ? Store.getCategory(editId) : null;
+    if(isEdit && !cat) return;
     var ICONS = ['utensils','car','zap','shopping-cart','heart','graduation-cap','home2','tag','briefcase','gift','coffee','shirt','book','plane','phone','wifi'];
     var COLORS = ['#EF4444','#F59E0B','#10B981','#3B82F6','#8B5CF6','#EC4899','#06B6D4','#64748B'];
+    if(cat && ICONS.indexOf(cat.icon) === -1) ICONS.unshift(cat.icon);
+    if(cat && COLORS.indexOf(cat.color) === -1) COLORS.unshift(cat.color);
+    var selType = cat ? cat.type : 'expense';
+    var selIcon = cat ? cat.icon : ICONS[0];
+    var selColor = cat ? cat.color : COLORS[0];
     var body =
+      (isEdit ? '' :
       '<div class="type-toggle" id="newCatType">' +
         '<button type="button" data-t="expense" class="active expense">ব্যয়</button>' +
         '<button type="button" data-t="income">আয়</button>' +
-      '</div>' +
-      '<div class="field"><label class="field-label">নাম</label><input type="text" class="field-input" id="newCatName" placeholder="ক্যাটাগরির নাম"></div>' +
+      '</div>') +
+      '<div class="field"><label class="field-label">নাম</label><input type="text" class="field-input" id="newCatName" maxlength="50" value="' + (cat ? UI.esc(cat.name) : '') + '" placeholder="ক্যাটাগরির নাম"></div>' +
       '<div class="field"><label class="field-label">আইকন</label><div class="category-grid" id="newCatIcons">' +
-        ICONS.map(function(ic, i){ return '<button type="button" class="category-item' + (i === 0 ? ' active' : '') + '" data-i="' + ic + '">' + Icons.svg(ic, 22) + '</button>'; }).join('') +
+        ICONS.map(function(ic){ return '<button type="button" class="category-item' + (ic === selIcon ? ' active' : '') + '" data-i="' + ic + '">' + Icons.svg(ic, 22) + '</button>'; }).join('') +
       '</div></div>' +
       '<div class="field"><label class="field-label">রঙ</label><div style="display:flex;gap:8px;flex-wrap:wrap;" id="newCatColors">' +
-        COLORS.map(function(c, i){ return '<button type="button" style="width:32px;height:32px;border-radius:50%;border:3px solid ' + (i === 0 ? '#fff' : 'transparent') + ';background:' + c + ';" data-c="' + c + '"></button>'; }).join('') +
+        COLORS.map(function(c){ return '<button type="button" style="width:32px;height:32px;border-radius:50%;border:3px solid ' + (c === selColor ? '#fff' : 'transparent') + ';background:' + c + ';" data-c="' + c + '"></button>'; }).join('') +
       '</div></div>';
     var footer = '<button type="button" class="btn btn-primary" id="saveCatBtn">সেভ করুন</button>';
-    var m = UI.openModal({ title: 'নতুন ক্যাটাগরি', body: body, footer: footer });
+    var m = UI.openModal({ title: isEdit ? 'ক্যাটাগরি এডিট' : 'নতুন ক্যাটাগরি', body: body, footer: footer });
     if(!m) return;
-    var selType = 'expense', selIcon = ICONS[0], selColor = COLORS[0];
     var bd = m.backdrop;
 
     bd.querySelectorAll('#newCatType button').forEach(function(b){
@@ -520,11 +611,13 @@ var App = (function(){
       var name = bd.querySelector('#newCatName').value.trim();
       if(!name){ UI.toast('নাম দিন'); return; }
       try {
-        Store.addCategory({ type: selType, name: name, icon: selIcon, color: selColor });
+        if(isEdit) Store.updateCategory(editId, { name: name, icon: selIcon, color: selColor });
+        else Store.addCategory({ type: selType, name: name, icon: selIcon, color: selColor });
         m.close();
-        UI.toast('যোগ হয়েছে');
+        UI.toast(isEdit ? 'আপডেট হয়েছে' : 'যোগ হয়েছে');
+        UI.refreshAll();
         setTimeout(renderCats, 250);
-      } catch(e){ UI.toast(e.message); }
+      } catch(e){ UI.toast(T('সমস্যা: {0}', e.message)); }
     });
   }
 
@@ -537,7 +630,7 @@ var App = (function(){
       return '<div class="txn-item" style="cursor:default;' + (a.archived ? 'opacity:.5;' : '') + '">' +
         '<div class="txn-icon" style="background:' + UI.esc(a.color) + '1A;color:' + UI.esc(a.color) + ';">' +
           Icons.svg(a.icon, 18) + '</div>' +
-        '<div class="txn-body"><div class="txn-title">' + UI.esc(a.name) + (a.archived ? ' (আর্কাইভ)' : '') + '</div>' +
+        '<div class="txn-body"><div class="txn-title">' + UI.esc(a.name) + (a.archived ? ' <span>(আর্কাইভ)</span>' : '') + '</div>' +
         '<div class="txn-meta">' + UI.money(bal) + '</div></div>' +
         (!a.system ? '<button type="button" class="link-btn" data-edit="' + UI.esc(a.id) + '" style="margin-right:6px;">এডিট</button>' : '') +
         (!a.system ? '<button type="button" class="link-btn" data-del="' + UI.esc(a.id) + '" style="color:var(--expense);">' + (a.archived ? 'ফিরান' : 'মুছুন') + '</button>' : '') +
@@ -631,7 +724,7 @@ var App = (function(){
         UI.toast('সেভ হয়েছে');
         UI.refreshAll();
         setTimeout(renderAccs, 250);
-      } catch(e){ UI.toast(e.message); }
+      } catch(e){ UI.toast(T('সমস্যা: {0}', e.message)); }
     });
   }
 
@@ -671,7 +764,7 @@ var App = (function(){
   function setPinFlow(){
     var L = Security.PIN_LENGTH;
     var body =
-      '<div class="field"><label class="field-label">নতুন PIN (' + L + ' সংখ্যা)</label>' +
+      '<div class="field"><label class="field-label">' + UI.esc(T('নতুন PIN ({0} সংখ্যা)', I18n.num(L))) + '</label>' +
         '<input type="password" inputmode="numeric" maxlength="' + L + '" class="field-input" id="p1" style="text-align:center;font-size:1.5rem;letter-spacing:.5em;"></div>' +
       '<div class="field"><label class="field-label">আবার লিখুন</label>' +
         '<input type="password" inputmode="numeric" maxlength="' + L + '" class="field-input" id="p2" style="text-align:center;font-size:1.5rem;letter-spacing:.5em;"></div>';
@@ -683,14 +776,14 @@ var App = (function(){
     bd.querySelector('#svPin').addEventListener('click', function(){
       var a = bd.querySelector('#p1').value;
       var b = bd.querySelector('#p2').value;
-      if(a.length !== L || !/^\d+$/.test(a)){ UI.toast('PIN ' + L + ' সংখ্যার হতে হবে'); return; }
+      if(a.length !== L || !/^\d+$/.test(a)){ UI.toast(T('PIN {0} সংখ্যার হতে হবে', I18n.num(L))); return; }
       if(a !== b){ UI.toast('দুটি PIN মিলছে না'); return; }
       Security.setPin(a).then(function(){
         m.close();
         UI.toast('PIN সেট হয়েছে');
         UI.renderSettings();
       }).catch(function(e){
-        UI.toast('সমস্যা: ' + e.message);
+        UI.toast(T('সমস্যা: {0}', e.message));
       });
     });
   }
@@ -713,13 +806,13 @@ var App = (function(){
       var cur = bd.querySelector('#c1').value;
       var a = bd.querySelector('#c2').value;
       var b = bd.querySelector('#c3').value;
-      if(a.length !== L || !/^\d+$/.test(a)){ UI.toast('নতুন PIN ' + L + ' সংখ্যার হতে হবে'); return; }
+      if(a.length !== L || !/^\d+$/.test(a)){ UI.toast(T('নতুন PIN {0} সংখ্যার হতে হবে', I18n.num(L))); return; }
       if(a !== b){ UI.toast('দুটি PIN মিলছে না'); return; }
       Security.changePin(cur, a).then(function(ok){
         if(!ok){ UI.toast('বর্তমান PIN ভুল'); return; }
         m.close();
         UI.toast('পরিবর্তন হয়েছে');
-      }).catch(function(e){ UI.toast('সমস্যা: ' + e.message); });
+      }).catch(function(e){ UI.toast(T('সমস্যা: {0}', e.message)); });
     });
   }
 
@@ -729,6 +822,7 @@ var App = (function(){
       '<div style="display:flex;flex-direction:column;gap:10px;">' +
         '<button type="button" class="btn btn-primary" id="expPlain">ডাউনলোড (সাধারণ)</button>' +
         '<button type="button" class="btn btn-secondary" id="expEnc">ডাউনলোড (পাসওয়ার্ড সহ)</button>' +
+        '<button type="button" class="btn btn-secondary" id="expCsv">CSV ডাউনলোড (এক্সেলের জন্য)</button>' +
         '<button type="button" class="btn btn-secondary" id="impBtn">ব্যাকআপ থেকে ফিরিয়ে আনুন</button>' +
         '<input type="file" id="impFile" accept=".json,application/json" style="display:none;">' +
       '</div>';
@@ -743,6 +837,11 @@ var App = (function(){
       UI.toast('ডাউনলোড হয়েছে');
     });
 
+    bd.querySelector('#expCsv').addEventListener('click', function(){
+      downloadText(Store.exportCSV(), 'hisab-' + Store.todayISO() + '.csv', 'text/csv;charset=utf-8');
+      UI.toast('ডাউনলোড হয়েছে');
+    });
+
     bd.querySelector('#expEnc').addEventListener('click', function(){
       askPassword('ব্যাকআপ পাসওয়ার্ড (কমপক্ষে ৪ অক্ষর)').then(function(pw){
         if(!pw) return;
@@ -752,7 +851,7 @@ var App = (function(){
           Store.markBackupDone();
           UI.renderSettings();
           UI.toast('ডাউনলোড হয়েছে');
-        }).catch(function(e){ UI.toast('ব্যর্থ: ' + e.message); });
+        }).catch(function(e){ UI.toast(T('ব্যর্থ: {0}', e.message)); });
       });
     });
 
@@ -763,6 +862,7 @@ var App = (function(){
     bd.querySelector('#impFile').addEventListener('change', function(e){
       var file = e.target.files && e.target.files[0];
       if(!file) return;
+      if(file.size > 10 * 1024 * 1024){ UI.toast('ফাইলটি অনেক বড়'); e.target.value = ''; return; }
       var reader = new FileReader();
       reader.onload = function(){
         var data;
@@ -793,14 +893,21 @@ var App = (function(){
   function doImport(data){
     var v = Store.validateImport(data);
     if(!v.ok){ UI.toast('সঠিক ব্যাকআপ নয়'); return; }
+    var skipped = v.stats.skipped > 0 ? T('\n({0}টি অবৈধ রেকর্ড বাদ যাবে)', I18n.num(v.stats.skipped)) : '';
     UI.confirm(
-      'এই ব্যাকআপে ' + v.stats.entries + 'টি লেনদেন, ' + v.stats.accounts + 'টি অ্যাকাউন্ট, ' + v.stats.categories + 'টি ক্যাটাগরি আছে।\n\nবর্তমান সব ডেটা মুছে যাবে এবং এই ব্যাকআপ থেকে বসবে। চালিয়ে যাবেন?',
+      T('এই ব্যাকআপে {0}টি লেনদেন, {1}টি অ্যাকাউন্ট, {2}টি ক্যাটাগরি আছে।{3}\n\nবর্তমান সব ডেটা মুছে যাবে এবং এই ব্যাকআপ থেকে বসবে। নিরাপত্তার জন্য রিস্টোরের আগে বর্তমান ডেটার একটি ব্যাকআপ ডাউনলোড হবে। চালিয়ে যাবেন?',
+        I18n.num(v.stats.entries), I18n.num(v.stats.accounts), I18n.num(v.stats.categories), skipped),
       function(){
         try {
+          /* রিস্টোরের আগে বর্তমান ডেটার স্বয়ংক্রিয় সেফটি-ব্যাকআপ */
+          downloadJSON(Store.exportData(), 'hisab-before-restore-' + Store.todayISO() + '.json');
           var stats = Store.importData(data);
-          UI.toast('ফিরিয়ে আনা হয়েছে: ' + stats.entries + 'টি লেনদেন');
+          UI.applyTheme();
+          UI.applyFont();
+          UI.applyLanguage();
+          UI.toast(T('ফিরিয়ে আনা হয়েছে: {0}টি লেনদেন', I18n.num(stats.entries)));
           UI.refreshAll();
-        } catch(e){ UI.toast('ব্যর্থ: ' + e.message); }
+        } catch(e){ UI.toast(T('ব্যর্থ: {0}', e.message)); }
       },
       { danger: true, yesText: 'হ্যাঁ, রিস্টোর করুন' }
     );
@@ -836,10 +943,9 @@ var App = (function(){
     });
   }
 
-  function downloadJSON(obj, filename){
+  function downloadText(text, filename, mime){
     try {
-      var str = JSON.stringify(obj, null, 2);
-      var blob = new Blob([str], { type: 'application/json' });
+      var blob = new Blob([text], { type: mime });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
@@ -853,6 +959,10 @@ var App = (function(){
     }
   }
 
+  function downloadJSON(obj, filename){
+    downloadText(JSON.stringify(obj, null, 2), filename, 'application/json');
+  }
+
   /* ---------- About / Reset ---------- */
   function openAboutModal(){
     var body =
@@ -861,9 +971,9 @@ var App = (function(){
           Icons.svg('receipt', 32) +
         '</div>' +
         '<div style="font-size:1.25rem;font-weight:800;">হিসাব খাতা</div>' +
-        '<div style="font-size:.8125rem;color:var(--text-2);margin-top:4px;">সংস্করণ ৩.০</div>' +
+        '<div style="font-size:.8125rem;color:var(--text-2);margin-top:4px;">' + UI.esc(T('সংস্করণ {0}', I18n.num(Store.APP_VERSION))) + '</div>' +
       '</div>' +
-      '<p style="line-height:1.7;font-size:.9375rem;color:var(--text-2);">আপনার দৈনন্দিন আয়-ব্যয়, সেভিংস ও আর্থিক অবস্থা ট্র্যাক করার আধুনিক, নিরাপদ অ্যাপ।</p>' +
+      '<p style="line-height:1.7;font-size:.9375rem;color:var(--text-2);">আপনার দৈনন্দিন আয়-ব্যয়, সেভিংস ও আর্থিক অবস্থা ট্র্যাক করার সহজ ও অফলাইন-ফ্রেন্ডলি অ্যাপ। সব ডেটা শুধু আপনার ডিভাইসে থাকে।</p>' +
       '<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border-soft);">' +
         '<div style="font-size:.8125rem;color:var(--text-3);">তৈরি করেছেন</div>' +
         '<div style="font-size:.9375rem;font-weight:700;margin-top:2px;">Imran Islam Hridoy</div>' +

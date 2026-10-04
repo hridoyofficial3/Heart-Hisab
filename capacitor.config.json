@@ -1,0 +1,7 @@
+{
+  "appId": "com.hridoy.hisabkhata",
+  "appName": "হিসাব খাতা",
+  "webDir": "www",
+  "server": { "androidScheme": "https" },
+  "android": { "allowMixedContent": false }
+}

@@ -10,12 +10,14 @@ var Security = (function(){
     PIN_SALT:  'hk3_lock_pin_salt',
     LAST_ACT:  'hk3_lock_last_activity',
     ATTEMPTS:  'hk3_lock_attempts',
-    COOLDOWN:  'hk3_lock_cooldown'
+    COOLDOWN:  'hk3_lock_cooldown',
+    LEVEL:     'hk3_lock_level'
   };
 
   var PIN_LENGTH = 4;
   var MAX_ATTEMPTS = 5;
-  var COOLDOWN_MS = 30000;
+  var COOLDOWN_MS = 30000;          /* প্রথম লকআউট ৩০ সেকেন্ড, প্রতিবার দ্বিগুণ (সর্বোচ্চ ১ ঘণ্টা) */
+  var COOLDOWN_MAX_MS = 3600000;
   var IDLE_MS = 5 * 60 * 1000;
 
   /* ---------- Crypto availability ---------- */
@@ -54,6 +56,13 @@ var Security = (function(){
       });
   }
 
+  function safeEqual(a, b){
+    if(a.length !== b.length) return false;
+    var r = 0;
+    for(var i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return r === 0;
+  }
+
   /* ---------- PIN ---------- */
   function isPinSet(){
     return lsGet(K.ENABLED) === '1' && !!lsGet(K.PIN_HASH) && !!lsGet(K.PIN_SALT);
@@ -78,6 +87,7 @@ var Security = (function(){
       }
       lsDel(K.ATTEMPTS);
       lsDel(K.COOLDOWN);
+      lsDel(K.LEVEL);
       return true;
     });
   }
@@ -89,7 +99,7 @@ var Security = (function(){
     var salt = lsGet(K.PIN_SALT);
     if(!hash || !salt) return Promise.resolve(false);
     return pbkdf2(pin, new Uint8Array(b64ToBuf(salt)), 310000, 256)
-      .then(function(bits){ return bufToB64(bits) === hash; })
+      .then(function(bits){ return safeEqual(bufToB64(bits), hash); })
       .catch(function(){ return false; });
   }
 
@@ -101,7 +111,7 @@ var Security = (function(){
   }
 
   function clearPin(){
-    [K.ENABLED, K.PIN_HASH, K.PIN_SALT, K.ATTEMPTS, K.COOLDOWN].forEach(lsDel);
+    [K.ENABLED, K.PIN_HASH, K.PIN_SALT, K.ATTEMPTS, K.COOLDOWN, K.LEVEL, K.LAST_ACT].forEach(lsDel);
   }
 
   /* ---------- Attempts / Cooldown ---------- */
@@ -115,9 +125,12 @@ var Security = (function(){
   function recordFailure(){
     var n = getAttempts() + 1;
     if(n >= MAX_ATTEMPTS){
-      lsSet(K.COOLDOWN, String(Date.now() + COOLDOWN_MS));
+      var level = Number(lsGet(K.LEVEL)) || 0;
+      var ms = Math.min(COOLDOWN_MS * Math.pow(2, level), COOLDOWN_MAX_MS);
+      lsSet(K.COOLDOWN, String(Date.now() + ms));
+      lsSet(K.LEVEL, String(level + 1));
       lsDel(K.ATTEMPTS);
-      return { cooldownSec: Math.ceil(COOLDOWN_MS / 1000) };
+      return { cooldownSec: Math.ceil(ms / 1000) };
     }
     lsSet(K.ATTEMPTS, String(n));
     return { attempts: n };
@@ -126,11 +139,16 @@ var Security = (function(){
   function recordSuccess(){
     lsDel(K.ATTEMPTS);
     lsDel(K.COOLDOWN);
+    lsDel(K.LEVEL);
   }
 
   /* ---------- Idle ---------- */
-  function recordActivity(){
-    lsSet(K.LAST_ACT, String(Date.now()));
+  var lastActWrite = 0;
+  function recordActivity(force){
+    var now = Date.now();
+    if(!force && now - lastActWrite < 2000) return;   /* প্রতি স্ক্রল/টাচে localStorage লেখা এড়াতে */
+    lastActWrite = now;
+    lsSet(K.LAST_ACT, String(now));
   }
 
   function isIdle(){
